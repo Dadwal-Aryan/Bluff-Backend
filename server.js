@@ -120,7 +120,7 @@ io.on('connection', (socket) => {
       declaredRank,
     };
 
-    // *** FIXED: include declaredRank here ***
+    // FIX: include declaredRank in event emit
     io.to(roomId).emit('cards played', { playerId: socket.id, playedCards, declaredRank });
 
     room.turnIndex = (room.turnIndex + 1) % room.players.length;
