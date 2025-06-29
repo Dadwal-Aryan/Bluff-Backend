@@ -35,8 +35,6 @@ function emitRoomState(roomId) {
         id,
         name: room.names[id] || 'Player',
     }));
-    // --- DEBUG LOG ---
-    console.log(`[emitRoomState in ${roomId}]: Emitting players:`, JSON.stringify(playersWithNames));
     io.to(roomId).emit('room state', playersWithNames);
 }
 
@@ -44,8 +42,6 @@ function startGame(roomId) {
     const room = rooms[roomId];
     if (!room || room.players.length < 2) return;
 
-    // --- DEBUG LOG ---
-    console.log(`[startGame]: Starting/Restarting game in room ${roomId}.`);
     const deck = shuffle(generateDeck());
     const handSize = Math.floor(deck.length / 2);
 
@@ -58,41 +54,25 @@ function startGame(roomId) {
     room.turnIndex = Math.floor(Math.random() * room.players.length);
     room.skippedPlayers = [];
     
-    const gameStartPayload = {
+    io.to(roomId).emit('game started', {
         hands: room.hands,
         turn: room.players[room.turnIndex],
         players: room.players.map(id => ({ id, name: room.names[id] || 'Player' }))
-    };
-     // --- DEBUG LOG ---
-    console.log(`[startGame]: Emitting 'game started' with payload:`, JSON.stringify(gameStartPayload));
-    io.to(roomId).emit('game started', gameStartPayload);
+    });
 }
 
 io.on('connection', (socket) => {
-  // --- DEBUG LOG ---
-  console.log(`[connection]: A user connected with ID: ${socket.id}`);
-
   socket.on('join room', ({ roomId, playerName }) => {
-    // --- DEBUG LOG ---
-    console.log(`[join room]: Received join request from ${socket.id} (${playerName}) for room ${roomId}`);
-
     socket.join(roomId);
     if (!rooms[roomId]) {
-      // --- DEBUG LOG ---
-      console.log(`[join room]: Room ${roomId} not found. Creating it.`);
       rooms[roomId] = { players: [], names: {}, hands: {}, tableCards: [], lastPlayed: null, turnIndex: 0, skippedPlayers: [] };
     }
     const room = rooms[roomId];
 
     if (!room.players.includes(socket.id)) {
-      // --- DEBUG LOG ---
-      console.log(`[join room]: Adding ${socket.id} to room ${roomId}.`);
       room.players.push(socket.id);
     }
     room.names[socket.id] = playerName || `Player #${room.players.length}`;
-    
-    // --- DEBUG LOG ---
-    console.log(`[join room]: Current players in ${roomId}:`, JSON.stringify(room.players));
 
     if (room.players.length === 2 && Object.keys(room.hands).length === 0) {
       startGame(roomId);
@@ -104,8 +84,6 @@ io.on('connection', (socket) => {
   socket.on('set name', ({ roomId, name }) => {
     const room = rooms[roomId];
     if (room && room.names[socket.id]) {
-      // --- DEBUG LOG ---
-      console.log(`[set name]: Setting name for ${socket.id} to ${name}`);
       room.names[socket.id] = name;
       emitRoomState(roomId);
     }
@@ -148,14 +126,18 @@ io.on('connection', (socket) => {
       }
 
       if (room.skippedPlayers.length >= room.players.length) {
+          const firstSkipperId = room.skippedPlayers[0];
           room.tableCards = [];
           room.lastPlayed = null;
           room.skippedPlayers = [];
           io.to(roomId).emit('message', 'All players skipped. The pile is cleared.');
           io.to(roomId).emit('table cleared');
+          
+          room.turnIndex = room.players.findIndex(p => p === firstSkipperId);
+      } else {
+        room.turnIndex = (room.turnIndex + 1) % room.players.length;
       }
       
-      room.turnIndex = (room.turnIndex + 1) % room.players.length;
       io.to(roomId).emit('turn', room.players[room.turnIndex]);
   });
 
@@ -169,15 +151,26 @@ io.on('connection', (socket) => {
       const isBluff = cards.some(c => !c.startsWith(declaredRank));
       const callerId = socket.id;
 
-      const loserId = isBluff ? bluffedPlayerId : callerId;
-      room.hands[loserId].push(...room.tableCards);
-      io.to(roomId).emit('message', `${room.names[callerId]} called bluff. It was ${isBluff ? 'a bluff!' : 'not a bluff!'} ${room.names[loserId]} takes the pile.`);
+      let nextPlayerId;
+
+      if (isBluff) {
+        room.hands[bluffedPlayerId].push(...room.tableCards);
+        nextPlayerId = callerId;
+        io.to(roomId).emit('message', `${room.names[callerId]} called bluff correctly! ${room.names[bluffedPlayerId]} takes the pile.`);
+      } else {
+        room.hands[callerId].push(...room.tableCards);
+        nextPlayerId = bluffedPlayerId;
+        io.to(roomId).emit('message', `${room.names[callerId]} called bluff incorrectly! They take the pile.`);
+      }
       
       room.tableCards = [];
       room.lastPlayed = null;
       room.skippedPlayers = [];
       io.to(roomId).emit('table cleared');
       io.to(roomId).emit('update hands', room.hands);
+      
+      room.turnIndex = room.players.findIndex(p => p === nextPlayerId);
+      io.to(roomId).emit('turn', room.players[room.turnIndex]);
   });
   
   socket.on('request new game', ({ roomId }) => {
@@ -187,24 +180,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    // --- DEBUG LOG ---
-    console.log(`[disconnect]: User ${socket.id} disconnected.`);
     for (const roomId in rooms) {
       const room = rooms[roomId];
       if (room.players.includes(socket.id)) {
-        const oldPlayerName = room.names[socket.id];
-        // --- DEBUG LOG ---
-        console.log(`[disconnect]: Removing ${socket.id} (${oldPlayerName}) from room ${roomId}.`);
         room.players = room.players.filter(id => id !== socket.id);
         delete room.names[socket.id];
         delete room.hands[socket.id];
         if (room.players.length > 0) {
-            // --- DEBUG LOG ---
-            console.log(`[disconnect]: Room ${roomId} still has players. Emitting updated state.`);
             emitRoomState(roomId);
         } else {
-            // --- DEBUG LOG ---
-            console.log(`[disconnect]: Room ${roomId} is now empty. Deleting room.`);
             delete rooms[roomId];
         }
       }
