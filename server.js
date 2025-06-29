@@ -38,6 +38,7 @@ function emitRoomState(roomId) {
     io.to(roomId).emit('room state', playersWithNames);
 }
 
+// Updated startGame to send all initial data in one event
 function startGame(roomId) {
     const room = rooms[roomId];
     if (!room || room.players.length < 2) return;
@@ -55,9 +56,12 @@ function startGame(roomId) {
     room.turnIndex = Math.floor(Math.random() * room.players.length);
     room.skippedPlayers = [];
     
-    io.to(roomId).emit('deal cards', room.hands);
-    const currentTurn = room.players[room.turnIndex];
-    io.to(roomId).emit('turn', currentTurn);
+    // This event now contains everything the client needs to start the game
+    io.to(roomId).emit('game started', {
+        hands: room.hands,
+        turn: room.players[room.turnIndex],
+        players: room.players.map(id => ({ id, name: room.names[id] || 'Player' }))
+    });
 }
 
 io.on('connection', (socket) => {
@@ -75,10 +79,12 @@ io.on('connection', (socket) => {
       room.names[socket.id] = playerName || `Player #${room.players.length}`;
     }
 
-    emitRoomState(roomId);
-
+    // If the game is ready to start, startGame will handle sending the initial state.
+    // Otherwise, just update the player list.
     if (room.players.length === 2 && Object.keys(room.hands).length === 0) {
       startGame(roomId);
+    } else {
+      emitRoomState(roomId);
     }
   });
 
@@ -99,7 +105,6 @@ io.on('connection', (socket) => {
         return socket.emit('error message', "You don't have those cards!");
     }
 
-    // Enforce the declared rank if one is already set for the round
     if (room.lastPlayed && room.lastPlayed.declaredRank && declaredRank !== room.lastPlayed.declaredRank) {
         return socket.emit('error message', `You must play the declared rank of ${room.lastPlayed.declaredRank}.`);
     }
@@ -107,7 +112,6 @@ io.on('connection', (socket) => {
     room.hands[socket.id] = playerHand.filter(c => !playedCards.includes(c));
     room.tableCards.push(...playedCards);
     room.lastPlayed = { playerId: socket.id, cards: playedCards, declaredRank };
-    // A successful play resets the skip counter for the round
     room.skippedPlayers = [];
 
     io.to(roomId).emit('cards played', { whoPlayed: socket.id, playedCards, declaredRank });
@@ -129,16 +133,14 @@ io.on('connection', (socket) => {
           room.skippedPlayers.push(socket.id);
       }
 
-      // Check if all active players have skipped
       if (room.skippedPlayers.length >= room.players.length) {
           room.tableCards = [];
-          room.lastPlayed = null; // This clears the declared rank for the new round
+          room.lastPlayed = null;
           room.skippedPlayers = [];
           io.to(roomId).emit('message', 'All players skipped. The pile is cleared.');
           io.to(roomId).emit('table cleared');
       }
       
-      // Always advance the turn
       room.turnIndex = (room.turnIndex + 1) % room.players.length;
       io.to(roomId).emit('turn', room.players[room.turnIndex]);
   });
@@ -157,7 +159,6 @@ io.on('connection', (socket) => {
       room.hands[loserId].push(...room.tableCards);
       io.to(roomId).emit('message', `${room.names[callerId]} called bluff. It was ${isBluff ? 'a bluff!' : 'not a bluff!'} ${room.names[loserId]} takes the pile.`);
       
-      // A bluff call ends the round, so clear the table and ranks
       room.tableCards = [];
       room.lastPlayed = null;
       room.skippedPlayers = [];
