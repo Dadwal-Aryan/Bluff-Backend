@@ -113,22 +113,20 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('cards played', { whoPlayed: socket.id, playedCards, declaredRank });
     io.to(roomId).emit('update hands', room.hands);
 
-    // **THE FIX IS HERE**: We no longer check for a winner immediately.
-    // We just advance the turn to give the opponent a chance to call bluff.
-    room.turnIndex = (room.turnIndex + 1) % room.players.length;
-    io.to(roomId).emit('turn', room.players[room.turnIndex]);
+    if (room.hands[socket.id].length === 0) {
+      io.to(roomId).emit('game over', { winnerName: room.names[socket.id] });
+    } else {
+      room.turnIndex = (room.turnIndex + 1) % room.players.length;
+      io.to(roomId).emit('turn', room.players[room.turnIndex]);
+    }
   });
   
   socket.on('skip turn', ({ roomId }) => {
       const room = rooms[roomId];
       if (!room || socket.id !== room.players[room.turnIndex]) return;
 
-      // **THE FIX**: Check if the last play was a winning one.
-      // If the opponent skips, the player who played their last card wins.
-      const lastPlayerId = room.lastPlayed?.playerId;
-      if (lastPlayerId && room.hands[lastPlayerId]?.length === 0) {
-        return io.to(roomId).emit('game over', { winnerName: room.names[lastPlayerId] });
-      }
+      // **TWEAK 3**: Send a message indicating who skipped.
+      io.to(roomId).emit('message', `${room.names[socket.id]} skipped.`);
 
       if (!room.skippedPlayers.includes(socket.id)) {
           room.skippedPlayers.push(socket.id);
@@ -171,7 +169,6 @@ io.on('connection', (socket) => {
         nextPlayerId = bluffedPlayerId;
         io.to(roomId).emit('message', `${room.names[callerId]} called bluff incorrectly! They take the pile.`);
         
-        // **THE FIX**: Check if the player who was *not* bluffing now has 0 cards. If so, they win.
         if (room.hands[bluffedPlayerId]?.length === 0) {
             return io.to(roomId).emit('game over', { winnerName: room.names[bluffedPlayerId] });
         }
