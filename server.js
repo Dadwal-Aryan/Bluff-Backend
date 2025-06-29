@@ -110,7 +110,6 @@ io.on('connection', (socket) => {
     room.lastPlayed = { playerId: socket.id, cards: playedCards, declaredRank };
     room.skippedPlayers = [];
 
-    // **THE FIX**: Broadcast to EVERYONE in the room, including the sender.
     io.to(roomId).emit('cards played', { whoPlayed: socket.id, playedCards, declaredRank });
     io.to(roomId).emit('update hands', room.hands);
 
@@ -130,14 +129,20 @@ io.on('connection', (socket) => {
       }
 
       if (room.skippedPlayers.length >= room.players.length) {
+          const firstSkipperId = room.skippedPlayers[0];
           room.tableCards = [];
           room.lastPlayed = null;
           room.skippedPlayers = [];
           io.to(roomId).emit('message', 'All players skipped. The pile is cleared.');
           io.to(roomId).emit('table cleared');
+          
+          // **THE FIX**: Set the next turn to the player who skipped first.
+          room.turnIndex = room.players.findIndex(p => p === firstSkipperId);
+      } else {
+        // Just advance the turn if not everyone has skipped yet.
+        room.turnIndex = (room.turnIndex + 1) % room.players.length;
       }
       
-      room.turnIndex = (room.turnIndex + 1) % room.players.length;
       io.to(roomId).emit('turn', room.players[room.turnIndex]);
   });
 
@@ -151,15 +156,31 @@ io.on('connection', (socket) => {
       const isBluff = cards.some(c => !c.startsWith(declaredRank));
       const callerId = socket.id;
 
-      const loserId = isBluff ? bluffedPlayerId : callerId;
-      room.hands[loserId].push(...room.tableCards);
-      io.to(roomId).emit('message', `${room.names[callerId]} called bluff. It was ${isBluff ? 'a bluff!' : 'not a bluff!'} ${room.names[loserId]} takes the pile.`);
+      let nextPlayerId;
+
+      if (isBluff) {
+        // Bluff was successful, the player who bluffed takes the pile.
+        room.hands[bluffedPlayerId].push(...room.tableCards);
+        // **THE FIX**: The caller (who was right) starts the next round.
+        nextPlayerId = callerId;
+        io.to(roomId).emit('message', `${room.names[callerId]} called bluff correctly! ${room.names[bluffedPlayerId]} takes the pile.`);
+      } else {
+        // Bluff call failed, the caller takes the pile.
+        room.hands[callerId].push(...room.tableCards);
+        // **THE FIX**: The player who was wrongly accused starts the next round.
+        nextPlayerId = bluffedPlayerId;
+        io.to(roomId).emit('message', `${room.names[callerId]} called bluff incorrectly! They take the pile.`);
+      }
       
       room.tableCards = [];
       room.lastPlayed = null;
       room.skippedPlayers = [];
       io.to(roomId).emit('table cleared');
       io.to(roomId).emit('update hands', room.hands);
+      
+      // Update turn index to the correct player for the next round.
+      room.turnIndex = room.players.findIndex(p => p === nextPlayerId);
+      io.to(roomId).emit('turn', room.players[room.turnIndex]);
   });
   
   socket.on('request new game', ({ roomId }) => {
