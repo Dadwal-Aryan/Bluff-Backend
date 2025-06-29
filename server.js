@@ -38,6 +38,7 @@ function emitRoomState(roomId) {
     io.to(roomId).emit('room state', playersWithNames);
 }
 
+// Updated startGame to send all initial data in one event
 function startGame(roomId) {
     const room = rooms[roomId];
     if (!room || room.players.length < 2) return;
@@ -55,6 +56,7 @@ function startGame(roomId) {
     room.turnIndex = Math.floor(Math.random() * room.players.length);
     room.skippedPlayers = [];
     
+    // This event now contains everything the client needs to start the game
     io.to(roomId).emit('game started', {
         hands: room.hands,
         turn: room.players[room.turnIndex],
@@ -74,10 +76,11 @@ io.on('connection', (socket) => {
 
     if (!room.players.includes(socket.id)) {
       room.players.push(socket.id);
+      room.names[socket.id] = playerName || `Player #${room.players.length}`;
     }
-    // Always set/update the name when a player joins or reconnects
-    room.names[socket.id] = playerName || `Player #${room.players.length}`;
 
+    // If the game is ready to start, startGame will handle sending the initial state.
+    // Otherwise, just update the player list.
     if (room.players.length === 2 && Object.keys(room.hands).length === 0) {
       startGame(roomId);
     } else {
@@ -125,6 +128,7 @@ io.on('connection', (socket) => {
   socket.on('skip turn', ({ roomId }) => {
       const room = rooms[roomId];
       if (!room || socket.id !== room.players[room.turnIndex]) return;
+
       if (!room.skippedPlayers.includes(socket.id)) {
           room.skippedPlayers.push(socket.id);
       }
@@ -172,14 +176,12 @@ io.on('connection', (socket) => {
     for (const roomId in rooms) {
       const room = rooms[roomId];
       if (room.players.includes(socket.id)) {
-        console.log(`User ${socket.id} (${room.names[socket.id]}) disconnected from room ${roomId}`);
         room.players = room.players.filter(id => id !== socket.id);
         delete room.names[socket.id];
         delete room.hands[socket.id];
         if (room.players.length > 0) {
             emitRoomState(roomId);
         } else {
-            console.log(`Room ${roomId} is empty. Deleting.`);
             delete rooms[roomId];
         }
       }
