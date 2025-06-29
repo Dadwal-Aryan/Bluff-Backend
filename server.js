@@ -40,6 +40,17 @@ function shuffle(array) {
   return array.sort(() => Math.random() - 0.5);
 }
 
+// Helper to emit fresh room state (players + names) to all clients in the room
+function emitRoomState(roomId) {
+  const room = rooms[roomId];
+  if (!room) return;
+  const playersWithNames = room.players.map(id => ({
+    id,
+    name: room.names[id] || 'Player',
+  }));
+  io.to(roomId).emit('room state', playersWithNames);
+}
+
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
 
@@ -56,11 +67,7 @@ io.on('connection', (socket) => {
       rooms[roomId].names[socket.id] = 'Player'; // default name until set
     }
 
-    // Emit updated player list with names
-    io.to(roomId).emit('room state', rooms[roomId].players.map(id => ({
-      id,
-      name: rooms[roomId].names[id] || 'Player',
-    })));
+    emitRoomState(roomId);
 
     // Start game when 2 players joined and cards not dealt yet
     if (rooms[roomId].players.length === 2 && !rooms[roomId].hands[rooms[roomId].players[0]]) {
@@ -87,10 +94,7 @@ io.on('connection', (socket) => {
 
     rooms[roomId].names[socket.id] = name || 'Player';
 
-    io.to(roomId).emit('room state', rooms[roomId].players.map(id => ({
-      id,
-      name: rooms[roomId].names[id] || 'Player',
-    })));
+    emitRoomState(roomId);
   });
 
   socket.on('play cards', ({ roomId, playedCards, declaredRank }) => {
@@ -120,7 +124,6 @@ io.on('connection', (socket) => {
       declaredRank,
     };
 
-    // FIX: include declaredRank in event emit
     io.to(roomId).emit('cards played', { playerId: socket.id, playedCards, declaredRank });
 
     room.turnIndex = (room.turnIndex + 1) % room.players.length;
@@ -166,15 +169,13 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
     for (const roomId in rooms) {
-      rooms[roomId].players = rooms[roomId].players.filter(id => id !== socket.id);
-      delete rooms[roomId].names[socket.id];
+      const room = rooms[roomId];
+      room.players = room.players.filter(id => id !== socket.id);
+      delete room.names[socket.id];
 
-      io.to(roomId).emit('room state', rooms[roomId].players.map(id => ({
-        id,
-        name: rooms[roomId].names[id] || 'Player',
-      })));
+      emitRoomState(roomId);
 
-      if (rooms[roomId].players.length === 0) {
+      if (room.players.length === 0) {
         delete rooms[roomId];
       }
     }
