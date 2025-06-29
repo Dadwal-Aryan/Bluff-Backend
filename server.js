@@ -102,8 +102,8 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('cards played', { whoPlayed: socket.id, playedCards, declaredRank });
     io.to(roomId).emit('update hands', room.hands);
 
-    // **THE FIX**: The immediate win check is removed from here.
-    // The turn always passes to the next player to give them a chance to call bluff.
+    // **THE FIX**: We no longer check for a winner immediately.
+    // The turn always passes to the next player, giving them a chance to call bluff on the final play.
     room.turnIndex = (room.turnIndex + 1) % room.players.length;
     io.to(roomId).emit('turn', room.players[room.turnIndex]);
   });
@@ -112,10 +112,10 @@ io.on('connection', (socket) => {
       const room = rooms[roomId];
       if (!room || socket.id !== room.players[room.turnIndex]) return;
 
-      // **THE FIX**: If a player skips, check if the person who played last just won.
+      // **THE FIX**: When a player skips, we check if the person who played last just won.
+      // If the opponent chooses not to call bluff on the final play, the player with 0 cards wins.
       const lastPlayerId = room.lastPlayed?.playerId;
       if (lastPlayerId && room.hands[lastPlayerId]?.length === 0) {
-        // The opponent didn't call the bluff, so the player with 0 cards wins.
         return io.to(roomId).emit('game over', { winnerName: room.names[lastPlayerId] });
       }
 
@@ -162,7 +162,7 @@ io.on('connection', (socket) => {
         nextPlayerId = bluffedPlayerId;
         io.to(roomId).emit('message', `${room.names[callerId]} called bluff incorrectly! They take the pile.`);
         
-        // **THE FIX**: After a failed bluff call, check if the player who was telling the truth now has 0 cards.
+        // **THE FIX**: After a failed bluff call, we check if the player who was telling the truth now has 0 cards. If so, they win.
         if (room.hands[bluffedPlayerId]?.length === 0) {
             return io.to(roomId).emit('game over', { winnerName: room.names[bluffedPlayerId] });
         }
