@@ -12,7 +12,6 @@ const PORT = process.env.PORT || 3001;
 
 const rooms = {};
 
-// --- UTILITY FUNCTIONS ---
 function generateDeck() {
   const suits = ['♠', '♥', '♦', '♣'];
   const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
@@ -29,26 +28,14 @@ function shuffle(array) {
   return array.sort(() => Math.random() - 0.5);
 }
 
-// ** NEW ARCHITECTURE: Function to get the complete game state **
-function getGameState(roomId) {
+function emitRoomState(roomId) {
+    if (!rooms[roomId]) return;
     const room = rooms[roomId];
-    if (!room) return null;
-
-    return {
-        players: room.players.map(id => ({ id, name: room.names[id] || 'Player' })),
-        hands: room.hands,
-        turn: room.players[room.turnIndex],
-        lastPlayed: room.lastPlayed,
-        declaredRank: room.lastPlayed ? room.lastPlayed.declaredRank : '',
-    };
-}
-
-// ** NEW ARCHITECTURE: Function to broadcast the game state to all players **
-function broadcastGameState(roomId) {
-    const gameState = getGameState(roomId);
-    if (gameState) {
-        io.to(roomId).emit('game update', gameState);
-    }
+    const playersWithNames = room.players.map(id => ({
+        id,
+        name: room.names[id] || 'Player',
+    }));
+    io.to(roomId).emit('room state', playersWithNames);
 }
 
 function startGame(roomId) {
@@ -67,10 +54,13 @@ function startGame(roomId) {
     room.turnIndex = Math.floor(Math.random() * room.players.length);
     room.skippedPlayers = [];
     
-    broadcastGameState(roomId);
+    io.to(roomId).emit('game started', {
+        hands: room.hands,
+        turn: room.players[room.turnIndex],
+        players: room.players.map(id => ({ id, name: room.names[id] || 'Player' }))
+    });
 }
 
-// --- SOCKET EVENT HANDLERS ---
 io.on('connection', (socket) => {
   socket.on('join room', ({ roomId, playerName }) => {
     socket.join(roomId);
@@ -87,7 +77,7 @@ io.on('connection', (socket) => {
     if (room.players.length === 2 && Object.keys(room.hands).length === 0) {
       startGame(roomId);
     } else {
-      broadcastGameState(roomId);
+      emitRoomState(roomId);
     }
   });
 
@@ -96,25 +86,38 @@ io.on('connection', (socket) => {
     if (!room || socket.id !== room.players[room.turnIndex]) return;
 
     const playerHand = room.hands[socket.id];
-    if (!playedCards.every(c => playerHand.includes(c))) return;
-    if (room.lastPlayed && room.lastPlayed.declaredRank && declaredRank !== room.lastPlayed.declaredRank) return;
+    if (!playedCards.every(c => playerHand.includes(c))) {
+        return socket.emit('error message', "You don't have those cards!");
+    }
+
+    if (room.lastPlayed && room.lastPlayed.declaredRank && declaredRank !== room.lastPlayed.declaredRank) {
+        return socket.emit('error message', `You must play the declared rank of ${room.lastPlayed.declaredRank}.`);
+    }
 
     room.hands[socket.id] = playerHand.filter(c => !playedCards.includes(c));
     room.tableCards.push(...playedCards);
     room.lastPlayed = { playerId: socket.id, cards: playedCards, declaredRank };
     room.skippedPlayers = [];
 
-    if (room.hands[socket.id].length === 0) {
-      io.to(roomId).emit('game over', { winnerName: room.names[socket.id] });
-    } else {
-      room.turnIndex = (room.turnIndex + 1) % room.players.length;
-      broadcastGameState(roomId);
-    }
+    io.to(roomId).emit('cards played', { whoPlayed: socket.id, playedCards, declaredRank });
+    io.to(roomId).emit('update hands', room.hands);
+
+    // **THE FIX**: The immediate win check is removed from here.
+    // The turn always passes to the next player to give them a chance to call bluff.
+    room.turnIndex = (room.turnIndex + 1) % room.players.length;
+    io.to(roomId).emit('turn', room.players[room.turnIndex]);
   });
   
   socket.on('skip turn', ({ roomId }) => {
       const room = rooms[roomId];
       if (!room || socket.id !== room.players[room.turnIndex]) return;
+
+      // **THE FIX**: If a player skips, check if the person who played last just won.
+      const lastPlayerId = room.lastPlayed?.playerId;
+      if (lastPlayerId && room.hands[lastPlayerId]?.length === 0) {
+        // The opponent didn't call the bluff, so the player with 0 cards wins.
+        return io.to(roomId).emit('game over', { winnerName: room.names[lastPlayerId] });
+      }
 
       io.to(roomId).emit('message', `${room.names[socket.id]} skipped.`);
 
@@ -128,11 +131,14 @@ io.on('connection', (socket) => {
           room.lastPlayed = null;
           room.skippedPlayers = [];
           io.to(roomId).emit('message', 'All players skipped. The pile is cleared.');
+          io.to(roomId).emit('table cleared');
+          
           room.turnIndex = room.players.findIndex(p => p === firstSkipperId);
       } else {
         room.turnIndex = (room.turnIndex + 1) % room.players.length;
       }
-      broadcastGameState(roomId);
+      
+      io.to(roomId).emit('turn', room.players[room.turnIndex]);
   });
 
   socket.on('call bluff', ({ roomId }) => {
@@ -156,6 +162,7 @@ io.on('connection', (socket) => {
         nextPlayerId = bluffedPlayerId;
         io.to(roomId).emit('message', `${room.names[callerId]} called bluff incorrectly! They take the pile.`);
         
+        // **THE FIX**: After a failed bluff call, check if the player who was telling the truth now has 0 cards.
         if (room.hands[bluffedPlayerId]?.length === 0) {
             return io.to(roomId).emit('game over', { winnerName: room.names[bluffedPlayerId] });
         }
@@ -164,13 +171,17 @@ io.on('connection', (socket) => {
       room.tableCards = [];
       room.lastPlayed = null;
       room.skippedPlayers = [];
-      room.turnIndex = room.players.findIndex(p => p === nextPlayerId);
+      io.to(roomId).emit('table cleared');
+      io.to(roomId).emit('update hands', room.hands);
       
-      broadcastGameState(roomId);
+      room.turnIndex = room.players.findIndex(p => p === nextPlayerId);
+      io.to(roomId).emit('turn', room.players[room.turnIndex]);
   });
   
   socket.on('request new game', ({ roomId }) => {
-      if (rooms[roomId]) startGame(roomId);
+      if (rooms[roomId]) {
+          startGame(roomId);
+      }
   });
 
   socket.on('disconnect', () => {
@@ -181,7 +192,7 @@ io.on('connection', (socket) => {
         delete room.names[socket.id];
         delete room.hands[socket.id];
         if (room.players.length > 0) {
-            broadcastGameState(roomId);
+            emitRoomState(roomId);
         } else {
             delete rooms[roomId];
         }
