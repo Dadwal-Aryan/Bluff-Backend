@@ -10,16 +10,7 @@ const io = new Server(server, {
 
 const PORT = 3001;
 
-const rooms = {}; 
-// rooms structure example:
-// {
-//   roomId: {
-//     players: [socketId1, socketId2],
-//     hands: { socketId1: [...cards], socketId2: [...cards] },
-//     currentTurnIndex: 0,
-//     tablePile: []
-//   }
-// };
+const rooms = {}; // { roomId: { players: [socketId1, socketId2], hands: {}, tableCards: [], lastPlayed: { playerId, cards, declaredRank } } }
 
 function generateDeck() {
   const suits = ['♠', '♥', '♦', '♣'];
@@ -46,101 +37,119 @@ io.on('connection', (socket) => {
     socket.join(roomId);
 
     if (!rooms[roomId]) {
-      rooms[roomId] = {
-        players: [],
-        hands: {},
-        currentTurnIndex: 0,
-        tablePile: []
-      };
+      rooms[roomId] = { players: [], hands: {}, tableCards: [], lastPlayed: null, turnIndex: 0 };
     }
 
-    const room = rooms[roomId];
-    if (!room.players.includes(socket.id)) {
-      room.players.push(socket.id);
+    if (!rooms[roomId].players.includes(socket.id)) {
+      rooms[roomId].players.push(socket.id);
     }
 
-    // When 2 players have joined, start the game
-    if (room.players.length === 2) {
+    io.to(roomId).emit('room state', rooms[roomId].players);
+
+    // Start game when 2 players joined
+    if (rooms[roomId].players.length === 2 && !rooms[roomId].hands[rooms[roomId].players[0]]) {
       const deck = shuffle(generateDeck());
       const handSize = Math.floor(deck.length / 2);
 
-      // Deal cards to players and save in room state
-      room.hands[room.players[0]] = deck.slice(0, handSize);
-      room.hands[room.players[1]] = deck.slice(handSize);
+      rooms[roomId].hands[rooms[roomId].players[0]] = deck.slice(0, handSize);
+      rooms[roomId].hands[rooms[roomId].players[1]] = deck.slice(handSize);
+      rooms[roomId].tableCards = [];
+      rooms[roomId].lastPlayed = null;
+      rooms[roomId].turnIndex = 0;
 
-      room.currentTurnIndex = Math.floor(Math.random() * 2); // random starting player
-      room.tablePile = [];
+      io.to(rooms[roomId].players[0]).emit('deal cards', rooms[roomId].hands[rooms[roomId].players[0]]);
+      io.to(rooms[roomId].players[1]).emit('deal cards', rooms[roomId].hands[rooms[roomId].players[1]]);
 
-      // Send hands and initial turn
-      room.players.forEach(playerId => {
-        io.to(playerId).emit('deal cards', room.hands[playerId]);
-      });
-
-      io.to(roomId).emit('turn', room.players[room.currentTurnIndex]);
+      const currentTurn = rooms[roomId].players[rooms[roomId].turnIndex];
+      io.to(roomId).emit('turn', currentTurn);
     }
-
-    // Update room state for all players
-    io.to(roomId).emit('room state', room.players);
   });
 
-  socket.on('play cards', ({ roomId, playedCards }) => {
+  socket.on('play cards', ({ roomId, playedCards, declaredRank }) => {
     const room = rooms[roomId];
     if (!room) return;
 
-    const currentPlayerId = room.players[room.currentTurnIndex];
+    const currentPlayerId = room.players[room.turnIndex];
     if (socket.id !== currentPlayerId) {
-      socket.emit('error message', "It's not your turn");
+      socket.emit('error message', "It's not your turn!");
       return;
     }
 
+    // Validate player has these cards
     const playerHand = room.hands[socket.id];
-
-    // Validate player has those cards (basic check)
-    for (const card of playedCards) {
-      if (!playerHand.includes(card)) {
-        socket.emit('error message', "You don't have those cards");
-        return;
-      }
+    const hasAllCards = playedCards.every(card => playerHand.includes(card));
+    if (!hasAllCards) {
+      socket.emit('error message', "You don't have those cards!");
+      return;
     }
 
     // Remove played cards from player's hand
     room.hands[socket.id] = playerHand.filter(card => !playedCards.includes(card));
 
     // Add played cards to table pile
-    room.tablePile.push(...playedCards);
+    room.tableCards.push(...playedCards);
 
-    // Broadcast updated hand to current player
-    socket.emit('deal cards', room.hands[socket.id]);
+    // Save last played cards info with declared rank
+    room.lastPlayed = {
+      playerId: socket.id,
+      cards: playedCards,
+      declaredRank,
+    };
 
-    // Broadcast played cards to all in room
     io.to(roomId).emit('cards played', { playerId: socket.id, playedCards });
 
-    // Advance turn
-    room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
-    io.to(roomId).emit('turn', room.players[room.currentTurnIndex]);
+    // Switch turn to next player
+    room.turnIndex = (room.turnIndex + 1) % room.players.length;
+    io.to(roomId).emit('turn', room.players[room.turnIndex]);
+    io.to(roomId).emit('update hands', room.hands);
+  });
+
+  socket.on('call bluff', (roomId) => {
+    const room = rooms[roomId];
+    if (!room || !room.lastPlayed) {
+      socket.emit('error message', 'No cards have been played to call bluff on.');
+      return;
+    }
+
+    const callerId = socket.id;
+    const bluffedPlayerId = room.lastPlayed.playerId;
+
+    if (callerId === bluffedPlayerId) {
+      socket.emit('error message', 'You cannot call bluff on yourself.');
+      return;
+    }
+
+    const declaredRank = room.lastPlayed.declaredRank;
+    const actualRanks = room.lastPlayed.cards.map(card => card.slice(0, -1)); // remove suit to get rank
+
+    // Check if all played cards actually match declared rank
+    const isBluff = actualRanks.some(rank => rank !== declaredRank);
+
+    if (isBluff) {
+      // Opponent was bluffing: opponent picks up all table cards
+      room.hands[bluffedPlayerId].push(...room.tableCards);
+      io.to(roomId).emit('message', `Bluff called! Player ${bluffedPlayerId} was bluffing and picks up all cards.`);
+    } else {
+      // Caller was wrong: caller picks up all table cards
+      room.hands[callerId].push(...room.tableCards);
+      io.to(roomId).emit('message', `Bluff called wrongly! Player ${callerId} picks up all cards.`);
+    }
+
+    // Clear table
+    room.tableCards = [];
+    room.lastPlayed = null;
+
+    io.to(roomId).emit('update hands', room.hands);
+    io.to(roomId).emit('table cleared');
   });
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-
     for (const roomId in rooms) {
-      const room = rooms[roomId];
-      if (!room) continue;
-
-      room.players = room.players.filter(id => id !== socket.id);
-      delete room.hands[socket.id];
-
-      // If no players left, delete room
-      if (room.players.length === 0) {
+      rooms[roomId].players = rooms[roomId].players.filter(id => id !== socket.id);
+      io.to(roomId).emit('room state', rooms[roomId].players);
+      if (rooms[roomId].players.length === 0) {
         delete rooms[roomId];
-      } else {
-        io.to(roomId).emit('room state', room.players);
-
-        // If disconnected player was current turn, move turn to next
-        if (room.players[room.currentTurnIndex] === socket.id) {
-          room.currentTurnIndex = room.currentTurnIndex % room.players.length;
-          io.to(roomId).emit('turn', room.players[room.currentTurnIndex]);
-        }
       }
     }
   });
