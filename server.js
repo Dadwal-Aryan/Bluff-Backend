@@ -110,9 +110,8 @@ io.on('connection', (socket) => {
     room.lastPlayed = { playerId: socket.id, cards: playedCards, declaredRank };
     room.skippedPlayers = [];
 
-    // **THE FIX**: Broadcast to the room EXCEPT to the sender.
-    socket.to(roomId).emit('cards played', { whoPlayed: socket.id, playedCards, declaredRank });
-    // Still update everyone's hand, which is the source of truth from the server.
+    // **THE FIX**: Broadcast to EVERYONE in the room, including the sender.
+    io.to(roomId).emit('cards played', { whoPlayed: socket.id, playedCards, declaredRank });
     io.to(roomId).emit('update hands', room.hands);
 
     if (room.hands[socket.id].length === 0) {
