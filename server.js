@@ -19,7 +19,8 @@ const rooms = {};
 //     hands: {}, 
 //     tableCards: [], 
 //     lastPlayed: { playerId, cards, declaredRank }, 
-//     turnIndex: 0 
+//     turnIndex: 0,
+//     skippedPlayers: [] // newly added to track skips
 //   } 
 // }
 
@@ -40,17 +41,6 @@ function shuffle(array) {
   return array.sort(() => Math.random() - 0.5);
 }
 
-// Helper to emit fresh room state (players + names) to all clients in the room
-function emitRoomState(roomId) {
-  const room = rooms[roomId];
-  if (!room) return;
-  const playersWithNames = room.players.map(id => ({
-    id,
-    name: room.names[id] || 'Player',
-  }));
-  io.to(roomId).emit('room state', playersWithNames);
-}
-
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
 
@@ -59,7 +49,15 @@ io.on('connection', (socket) => {
     socket.join(roomId);
 
     if (!rooms[roomId]) {
-      rooms[roomId] = { players: [], names: {}, hands: {}, tableCards: [], lastPlayed: null, turnIndex: 0 };
+      rooms[roomId] = { 
+        players: [], 
+        names: {}, 
+        hands: {}, 
+        tableCards: [], 
+        lastPlayed: null, 
+        turnIndex: 0,
+        skippedPlayers: []
+      };
     }
 
     if (!rooms[roomId].players.includes(socket.id)) {
@@ -67,7 +65,11 @@ io.on('connection', (socket) => {
       rooms[roomId].names[socket.id] = 'Player'; // default name until set
     }
 
-    emitRoomState(roomId);
+    // Emit updated player list with names
+    io.to(roomId).emit('room state', rooms[roomId].players.map(id => ({
+      id,
+      name: rooms[roomId].names[id] || 'Player',
+    })));
 
     // Start game when 2 players joined and cards not dealt yet
     if (rooms[roomId].players.length === 2 && !rooms[roomId].hands[rooms[roomId].players[0]]) {
@@ -79,6 +81,7 @@ io.on('connection', (socket) => {
       rooms[roomId].tableCards = [];
       rooms[roomId].lastPlayed = null;
       rooms[roomId].turnIndex = 0;
+      rooms[roomId].skippedPlayers = [];
 
       io.to(rooms[roomId].players[0]).emit('deal cards', rooms[roomId].hands[rooms[roomId].players[0]]);
       io.to(rooms[roomId].players[1]).emit('deal cards', rooms[roomId].hands[rooms[roomId].players[1]]);
@@ -94,7 +97,10 @@ io.on('connection', (socket) => {
 
     rooms[roomId].names[socket.id] = name || 'Player';
 
-    emitRoomState(roomId);
+    io.to(roomId).emit('room state', rooms[roomId].players.map(id => ({
+      id,
+      name: rooms[roomId].names[id] || 'Player',
+    })));
   });
 
   socket.on('play cards', ({ roomId, playedCards, declaredRank }) => {
@@ -124,6 +130,10 @@ io.on('connection', (socket) => {
       declaredRank,
     };
 
+    // Reset skipped players on card play
+    room.skippedPlayers = [];
+
+    // Emit cards played event with declaredRank
     io.to(roomId).emit('cards played', { playerId: socket.id, playedCards, declaredRank });
 
     room.turnIndex = (room.turnIndex + 1) % room.players.length;
@@ -161,21 +171,55 @@ io.on('connection', (socket) => {
 
     room.tableCards = [];
     room.lastPlayed = null;
+    room.skippedPlayers = [];
 
     io.to(roomId).emit('update hands', room.hands);
     io.to(roomId).emit('table cleared');
   });
 
+  // Handle skip turn
+  socket.on('skip turn', (roomId) => {
+    const room = rooms[roomId];
+    if (!room) return;
+
+    const currentPlayerId = room.players[room.turnIndex];
+    if (socket.id !== currentPlayerId) {
+      socket.emit('error message', "It's not your turn!");
+      return;
+    }
+
+    if (!room.skippedPlayers.includes(socket.id)) {
+      room.skippedPlayers.push(socket.id);
+    }
+
+    io.to(roomId).emit('player skipped', socket.id);
+
+    room.turnIndex = (room.turnIndex + 1) % room.players.length;
+
+    if (room.skippedPlayers.length === room.players.length) {
+      // All players skipped: reset the round
+      room.lastPlayed = null;
+      room.tableCards = [];
+      room.skippedPlayers = [];
+      io.to(roomId).emit('table cleared');
+    }
+
+    io.to(roomId).emit('turn', room.players[room.turnIndex]);
+  });
+
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
     for (const roomId in rooms) {
-      const room = rooms[roomId];
-      room.players = room.players.filter(id => id !== socket.id);
-      delete room.names[socket.id];
+      rooms[roomId].players = rooms[roomId].players.filter(id => id !== socket.id);
+      delete rooms[roomId].names[socket.id];
+      delete rooms[roomId].hands[socket.id];
 
-      emitRoomState(roomId);
+      io.to(roomId).emit('room state', rooms[roomId].players.map(id => ({
+        id,
+        name: rooms[roomId].names[id] || 'Player',
+      })));
 
-      if (room.players.length === 0) {
+      if (rooms[roomId].players.length === 0) {
         delete rooms[roomId];
       }
     }
