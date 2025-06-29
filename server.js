@@ -12,6 +12,7 @@ const PORT = process.env.PORT || 3001;
 
 const rooms = {};
 
+// --- UTILITY FUNCTIONS ---
 function generateDeck() {
   const suits = ['♠', '♥', '♦', '♣'];
   const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
@@ -28,21 +29,32 @@ function shuffle(array) {
   return array.sort(() => Math.random() - 0.5);
 }
 
-function emitRoomState(roomId) {
-    if (!rooms[roomId]) return;
+// ** NEW ARCHITECTURE: Function to get the complete game state **
+function getGameState(roomId) {
     const room = rooms[roomId];
-    const playersWithNames = room.players.map(id => ({
-        id,
-        name: room.names[id] || 'Player',
-    }));
-    io.to(roomId).emit('room state', playersWithNames);
+    if (!room) return null;
+
+    return {
+        players: room.players.map(id => ({ id, name: room.names[id] || 'Player' })),
+        hands: room.hands,
+        turn: room.players[room.turnIndex],
+        lastPlayed: room.lastPlayed,
+        declaredRank: room.lastPlayed ? room.lastPlayed.declaredRank : '',
+    };
+}
+
+// ** NEW ARCHITECTURE: Function to broadcast the game state to all players **
+function broadcastGameState(roomId) {
+    const gameState = getGameState(roomId);
+    if (gameState) {
+        io.to(roomId).emit('game update', gameState);
+    }
 }
 
 function startGame(roomId) {
     const room = rooms[roomId];
     if (!room || room.players.length < 2) return;
 
-    console.log(`Starting/Restarting game in room ${roomId}`);
     const deck = shuffle(generateDeck());
     const handSize = Math.floor(deck.length / 2);
 
@@ -55,16 +67,11 @@ function startGame(roomId) {
     room.turnIndex = Math.floor(Math.random() * room.players.length);
     room.skippedPlayers = [];
     
-    io.to(roomId).emit('game started', {
-        hands: room.hands,
-        turn: room.players[room.turnIndex],
-        players: room.players.map(id => ({ id, name: room.names[id] || 'Player' }))
-    });
+    broadcastGameState(roomId);
 }
 
+// --- SOCKET EVENT HANDLERS ---
 io.on('connection', (socket) => {
-  console.log('A user connected:', socket.id);
-
   socket.on('join room', ({ roomId, playerName }) => {
     socket.join(roomId);
     if (!rooms[roomId]) {
@@ -80,15 +87,7 @@ io.on('connection', (socket) => {
     if (room.players.length === 2 && Object.keys(room.hands).length === 0) {
       startGame(roomId);
     } else {
-      emitRoomState(roomId);
-    }
-  });
-
-  socket.on('set name', ({ roomId, name }) => {
-    const room = rooms[roomId];
-    if (room && room.names[socket.id]) {
-      room.names[socket.id] = name;
-      emitRoomState(roomId);
+      broadcastGameState(roomId);
     }
   });
 
@@ -97,27 +96,19 @@ io.on('connection', (socket) => {
     if (!room || socket.id !== room.players[room.turnIndex]) return;
 
     const playerHand = room.hands[socket.id];
-    if (!playedCards.every(c => playerHand.includes(c))) {
-        return socket.emit('error message', "You don't have those cards!");
-    }
-
-    if (room.lastPlayed && room.lastPlayed.declaredRank && declaredRank !== room.lastPlayed.declaredRank) {
-        return socket.emit('error message', `You must play the declared rank of ${room.lastPlayed.declaredRank}.`);
-    }
+    if (!playedCards.every(c => playerHand.includes(c))) return;
+    if (room.lastPlayed && room.lastPlayed.declaredRank && declaredRank !== room.lastPlayed.declaredRank) return;
 
     room.hands[socket.id] = playerHand.filter(c => !playedCards.includes(c));
     room.tableCards.push(...playedCards);
     room.lastPlayed = { playerId: socket.id, cards: playedCards, declaredRank };
     room.skippedPlayers = [];
 
-    io.to(roomId).emit('cards played', { whoPlayed: socket.id, playedCards, declaredRank });
-    io.to(roomId).emit('update hands', room.hands);
-
     if (room.hands[socket.id].length === 0) {
       io.to(roomId).emit('game over', { winnerName: room.names[socket.id] });
     } else {
       room.turnIndex = (room.turnIndex + 1) % room.players.length;
-      io.to(roomId).emit('turn', room.players[room.turnIndex]);
+      broadcastGameState(roomId);
     }
   });
   
@@ -125,7 +116,6 @@ io.on('connection', (socket) => {
       const room = rooms[roomId];
       if (!room || socket.id !== room.players[room.turnIndex]) return;
 
-      // **TWEAK 3**: Send a message indicating who skipped.
       io.to(roomId).emit('message', `${room.names[socket.id]} skipped.`);
 
       if (!room.skippedPlayers.includes(socket.id)) {
@@ -138,14 +128,11 @@ io.on('connection', (socket) => {
           room.lastPlayed = null;
           room.skippedPlayers = [];
           io.to(roomId).emit('message', 'All players skipped. The pile is cleared.');
-          io.to(roomId).emit('table cleared');
-          
           room.turnIndex = room.players.findIndex(p => p === firstSkipperId);
       } else {
         room.turnIndex = (room.turnIndex + 1) % room.players.length;
       }
-      
-      io.to(roomId).emit('turn', room.players[room.turnIndex]);
+      broadcastGameState(roomId);
   });
 
   socket.on('call bluff', ({ roomId }) => {
@@ -177,31 +164,25 @@ io.on('connection', (socket) => {
       room.tableCards = [];
       room.lastPlayed = null;
       room.skippedPlayers = [];
-      io.to(roomId).emit('table cleared');
-      io.to(roomId).emit('update hands', room.hands);
-      
       room.turnIndex = room.players.findIndex(p => p === nextPlayerId);
-      io.to(roomId).emit('turn', room.players[room.turnIndex]);
+      
+      broadcastGameState(roomId);
   });
   
   socket.on('request new game', ({ roomId }) => {
-      if (rooms[roomId]) {
-          startGame(roomId);
-      }
+      if (rooms[roomId]) startGame(roomId);
   });
 
   socket.on('disconnect', () => {
     for (const roomId in rooms) {
       const room = rooms[roomId];
       if (room.players.includes(socket.id)) {
-        console.log(`User ${socket.id} (${room.names[socket.id]}) disconnected from room ${roomId}`);
         room.players = room.players.filter(id => id !== socket.id);
         delete room.names[socket.id];
         delete room.hands[socket.id];
         if (room.players.length > 0) {
-            emitRoomState(roomId);
+            broadcastGameState(roomId);
         } else {
-            console.log(`Room ${roomId} is empty. Deleting.`);
             delete rooms[roomId];
         }
       }
