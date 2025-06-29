@@ -65,7 +65,7 @@ io.on('connection', (socket) => {
       rooms[roomId].names[socket.id] = 'Player'; // default name until set
     }
 
-    // Emit updated player list with names
+    // Emit updated player list with names AFTER adding player
     io.to(roomId).emit('room state', rooms[roomId].players.map(id => ({
       id,
       name: rooms[roomId].names[id] || 'Player',
@@ -210,17 +210,22 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
     for (const roomId in rooms) {
-      rooms[roomId].players = rooms[roomId].players.filter(id => id !== socket.id);
-      delete rooms[roomId].names[socket.id];
-      delete rooms[roomId].hands[socket.id];
+      const room = rooms[roomId];
+      if (!room) continue;
 
-      io.to(roomId).emit('room state', rooms[roomId].players.map(id => ({
-        id,
-        name: rooms[roomId].names[id] || 'Player',
-      })));
+      if (room.players.includes(socket.id)) {
+        room.players = room.players.filter(id => id !== socket.id);
+        delete room.names[socket.id];
+        delete room.hands[socket.id];
 
-      if (rooms[roomId].players.length === 0) {
-        delete rooms[roomId];
+        if (room.players.length > 0) {
+          io.to(roomId).emit('room state', room.players.map(id => ({
+            id,
+            name: room.names[id] || 'Player',
+          })));
+        } else {
+          delete rooms[roomId];
+        }
       }
     }
   });
