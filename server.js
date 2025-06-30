@@ -29,6 +29,7 @@ function shuffle(array) {
   return array.sort(() => Math.random() - 0.5);
 }
 
+// ** This function gets the complete game state to send to clients **
 function getGameState(roomId) {
     const room = rooms[roomId];
     if (!room) return null;
@@ -42,6 +43,7 @@ function getGameState(roomId) {
     };
 }
 
+// ** This function broadcasts the single, true game state to all players **
 function broadcastGameState(roomId) {
     const gameState = getGameState(roomId);
     if (gameState) {
@@ -51,17 +53,14 @@ function broadcastGameState(roomId) {
 
 function startGame(roomId) {
     const room = rooms[roomId];
-    // **TWEAK**: Wait for 3 players to start
-    if (!room || room.players.length < 3) return;
+    if (!room || room.players.length < 2) return;
 
     const deck = shuffle(generateDeck());
-    // **TWEAK**: Deal 17 cards to each of the 3 players (51 total)
-    const handSize = 17;
+    const handSize = Math.floor(deck.length / 2);
 
     room.hands = {};
     room.hands[room.players[0]] = deck.slice(0, handSize);
     room.hands[room.players[1]] = deck.slice(handSize, handSize * 2);
-    room.hands[room.players[2]] = deck.slice(handSize * 2, handSize * 3);
 
     room.tableCards = [];
     room.lastPlayed = null;
@@ -85,8 +84,7 @@ io.on('connection', (socket) => {
     }
     room.names[socket.id] = playerName || `Player #${room.players.length}`;
 
-    // **TWEAK**: Start game when 3 players have joined
-    if (room.players.length === 3 && Object.keys(room.hands).length === 0) {
+    if (room.players.length === 2 && Object.keys(room.hands).length === 0) {
       startGame(roomId);
     } else {
       broadcastGameState(roomId);
@@ -106,12 +104,9 @@ io.on('connection', (socket) => {
     room.lastPlayed = { playerId: socket.id, cards: playedCards, declaredRank };
     room.skippedPlayers = [];
     
-    if (room.hands[socket.id].length === 0) {
-      io.to(roomId).emit('game over', { winnerName: room.names[socket.id] });
-    } else {
-      room.turnIndex = (room.turnIndex + 1) % room.players.length;
-      broadcastGameState(roomId);
-    }
+    // Always advance the turn. The win is checked when the opponent acts.
+    room.turnIndex = (room.turnIndex + 1) % room.players.length;
+    broadcastGameState(roomId);
   });
   
   socket.on('skip turn', ({ roomId }) => {
@@ -119,6 +114,7 @@ io.on('connection', (socket) => {
       if (!room || socket.id !== room.players[room.turnIndex]) return;
 
       const lastPlayerId = room.lastPlayed?.playerId;
+      // If the opponent skips the final winning play, the game is over.
       if (lastPlayerId && room.hands[lastPlayerId]?.length === 0) {
           return io.to(roomId).emit('game over', { winnerName: room.names[lastPlayerId] });
       }
@@ -163,6 +159,7 @@ io.on('connection', (socket) => {
         nextPlayerId = bluffedPlayerId;
         io.to(roomId).emit('message', `${room.names[callerId]} called bluff incorrectly! They take the pile.`);
         
+        // If the bluff call fails, check if the truthful player has won.
         if (room.hands[bluffedPlayerId]?.length === 0) {
             return io.to(roomId).emit('game over', { winnerName: room.names[bluffedPlayerId] });
         }
